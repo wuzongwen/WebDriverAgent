@@ -1,47 +1,82 @@
-name: Build WebDriverAgentRunner for iOS 16.4.1
+name: Build WebDriverAgentRunner.ipa
 
 on:
   push:
     branches:
-      - main
+      - master
+    paths-ignore:
+      - ".gitignore"
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - ".gitignore"
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 1 1 *'
+    - cron: '0 0 1 4 *'
+    - cron: '0 0 30 6 *'
+    - cron: '0 0 28 9 *'
+    - cron: '0 0 27 12 *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-latest
-
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v3
 
-    - name: Set up Xcode
-      uses: maxim-lobanov/setup-xcode@v1
-      with:
-        xcode-version: '14.3'  # 确保使用支持iOS 16.4.1的Xcode版本
+      - name: Install Procursus
+        uses: dhinakg/procursus-action@main
+        with:
+          packages: ldid findutils sed coreutils trustcache make
 
-    - name: Install dependencies
-      run: |
-        brew update
-        brew install carthage
+      - name: Install THEOS (without SDKs)
+        run: |
+          set -x
+          export BASEDIR="$(pwd)"
+          export THEOS="${BASEDIR}/theos"
+          mkdir -p $THEOS
+          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos >> install-theos.sh
+          gsed -E "/^\s*get_theos\s*$/,+1 s/^(\s*)(get_sdks)\s*$/\1mkdir -p \${THEOS}\/sdks\n\1touch \${THEOS}\/sdks\/sdk\n\1\2/g" -i install-theos.sh
+          bash install-theos.sh
+          cd $BASEDIR
 
-    - name: Build WebDriverAgent
-      run: |
-        carthage bootstrap --platform iOS
-        xcodebuild -project WebDriverAgent.xcodeproj -scheme WebDriverAgentRunner -sdk iphoneos -configuration Release archive -archivePath $PWD/build/WebDriverAgent.xcarchive CODE_SIGN_IDENTITY="iPhone Developer" PROVISIONING_PROFILE_SPECIFIER="Your_Provisioning_Profile"
+      - name: Set Environment Variables
+        run: |
+          set -x
+          T2=$(TZ=UTC-2 date +'%Y%m%d_%H%M%S')
+          TS=$(date -j -f "%Y%m%d_%H%M%S" "${T2}" +%s)
+          SHASH=$(git rev-parse --short HEAD)
+          echo "ctime=${T2}" >> $GITHUB_ENV
+          echo "ctimestamp=${TS}" >> $GITHUB_ENV
+          echo "shorthash=${SHASH}" >> $GITHUB_ENV
 
-    - name: Export IPA
-      run: |
-        xcodebuild -exportArchive -archivePath $PWD/build/WebDriverAgent.xcarchive -exportPath $PWD/build -exportOptionsPlist ExportOptions.plist
+      - name: Build
+        run: |
+          set -x
+          sudo security import Exploits/fastPath/arm.pfx -k /Library/Keychains/System.keychain -P password -A
+          export BASEDIR="$(pwd)"
+          export THEOS="${BASEDIR}/theos"
+          gmake -j$(sysctl -n hw.physicalcpu)
+          cp -a WebDriverAgentRunner/WebDriverAgentRunner.tipa Dopamine/Dopamine_${{ env.shorthash }}_${{ env.ctime }}.tipa
+          cp -a WebDriverAgentRunner/WebDriverAgentRunner.tipa WebDriverAgentRunner/WebDriverAgentRunner_Latest.tipa
 
-    - name: Upload IPA
-      uses: actions/upload-artifact@v2
-      with:
-        name: WebDriverAgentRunner
-        path: build/WebDriverAgent.ipa
-
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      CERTIFICATE_PRIVATE_KEY: ${{ secrets.CERTIFICATE_PRIVATE_KEY }}
-      CERTIFICATE: ${{ secrets.CERTIFICATE }}
-      PROVISIONING_PROFILE: ${{ secrets.PROVISIONING_PROFILE }}
+      - name: Upload Latest Artifact
+        id: dopamine-latest-upload
+        uses: actions/upload-artifact@v3
+        with:
+          name: Dopamine_Latest
+          path: |
+            ${{ github.workspace }}/WebDriverAgentRunner/WebDriverAgentRunner_Latest.tipa
+      - name: Upload Hashed Artifact
+        id: dopamine-hashed-upload
+        uses: actions/upload-artifact@v3
+        with:
+          name: WebDriverAgentRunner_${{ env.shorthash }}_${{ env.ctime }}
+          path: |
+            ${{ github.workspace }}/WebDriverAgentRunner/WebDriverAgentRunner_${{ env.shorthash }}_${{ env.ctime }}.tipa
